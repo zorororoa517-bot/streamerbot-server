@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<title>مثال داشبورد يتصل بسيرفر Streamer.bot</title>
+</head>
+<body>
+  <h2>حالة لايف</h2>
+  <pre id="output">بانتظار الاتصال...</pre>
+
+<script>
+  // غيّر هذا الرابط لرابط سيرفرك بعد الاستضافة (wss:// للـ HTTPS)
+  const SERVER_URL = 'ws://localhost:8080';
+
+  const ws = new WebSocket(SERVER_URL);
+  const output = document.getElementById('output');
+
+  ws.onopen = () => {
+    // نسجل نفسنا كـ "داشبورد" عشان السيرفر يميزنا عن Streamer.bot
+    ws.send(JSON.stringify({ type: 'register', role: 'dashboard' }));
+    output.textContent = 'تم الاتصال بالسيرفر ✅';
+  };
+
+  ws.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    console.log('استلمنا:', payload);
+
+    if (payload.type === 'state' || payload.type === 'event') {
+      output.textContent = JSON.stringify(payload.state || payload.data, null, 2);
+      // هنا تحدث الستريك/اللفل/البتس في واجهتك الفعلية بدل الطباعة فقط
+    }
+  };
+
+  ws.onerror = (err) => console.error('خطأ:', err);
+  ws.onclose = () => { output.textContent = 'انقطع الاتصال بالسيرفر ❌'; };
+</script>
+</body>
+</html>

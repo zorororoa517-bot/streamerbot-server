@@ -8,8 +8,11 @@
 const { WebSocketServer } = require('ws');
 const http = require('http');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = process.env.PORT || 8080;
+const DATA_FILE = path.join(__dirname, 'data.json');
 
 // ============ إعدادات Twitch API ============
 // نقرأهم من متغيرات البيئة (Environment Variables) بـ Render، ما نحطهم بالكود مباشرة لأسباب أمان
@@ -115,7 +118,32 @@ function fetchTwitchAvatar(login) {
 // ============ تخزين الحالة ============
 // كل يوزر مخزن حسب userId (ثابت لا يتغير)، ونحتفظ باسمه الحالي (username) للعرض
 // كل سجل: { username, level, streak, shareStreak, xp, avatar, lastUpdated }
-const users = {};
+
+// نحمل البيانات المحفوظة من الملف وقت بدء تشغيل السيرفر (لو موجود)
+let users = {};
+try {
+  if (fs.existsSync(DATA_FILE)) {
+    users = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    console.log(`تم تحميل ${Object.keys(users).length} مستخدم من الملف المحفوظ`);
+  }
+} catch (e) {
+  console.log('فشل تحميل البيانات المحفوظة، بنبدأ فاضي:', e.message);
+  users = {};
+}
+
+// نحفظ البيانات بالملف (نستدعيها بعد كل تحديث)
+let saveTimeout = null;
+function saveUsers() {
+  // نأخر الحفظ الفعلي شوي عشان لو جت أحداث كثيرة متتالية ما نكتب بالملف كل مرة
+  clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(() => {
+    try {
+      fs.writeFileSync(DATA_FILE, JSON.stringify(users, null, 2));
+    } catch (e) {
+      console.log('فشل حفظ البيانات:', e.message);
+    }
+  }, 500);
+}
 
 function ensureUser(userId, username) {
   if (!users[userId]) {
@@ -190,6 +218,8 @@ const httpServer = http.createServer((req, res) => {
 
         console.log(`حدث جديد: ${user.username} (${userId}) -> streak=${user.streak}, best=${user.streakBest}`);
 
+        saveUsers();
+
         // نبث التحديث فورًا (بدون انتظار الصورة، عشان ما نبطئ الاستجابة)
         broadcastToDashboards({
           type: 'event',
@@ -207,6 +237,7 @@ const httpServer = http.createServer((req, res) => {
           if (fetchedAvatar) {
             user.avatar = fetchedAvatar;
             console.log(`تم جلب صورة ${username}`);
+            saveUsers();
             broadcastToDashboards({
               type: 'event',
               userId,

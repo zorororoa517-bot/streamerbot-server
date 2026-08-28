@@ -10,20 +10,28 @@ const http = require('http');
 const PORT = process.env.PORT || 8080;
 
 // ============ تخزين الحالة ============
-// كل يوزر: { level, streak, shareStreak, xp, lastUpdated }
+// كل يوزر مخزن حسب userId (ثابت لا يتغير)، ونحتفظ باسمه الحالي (username) للعرض
+// كل سجل: { username, level, streak, shareStreak, xp, avatar, lastUpdated }
 const users = {};
 
-function ensureUser(name) {
-  if (!users[name]) {
-    users[name] = {
+function ensureUser(userId, username) {
+  if (!users[userId]) {
+    users[userId] = {
+      username: username || userId,
       level: null,
       streak: null,
+      streakBest: null,
       shareStreak: null,
       xp: null,
+      avatar: null,
       lastUpdated: null,
     };
   }
-  return users[name];
+  // نحدث الاسم لآخر اسم معروف (حتى لو غيّره الشخص)
+  if (username) {
+    users[userId].username = username;
+  }
+  return users[userId];
 }
 
 // ============ سيرفر HTTP ============
@@ -40,44 +48,50 @@ const httpServer = http.createServer((req, res) => {
   }
 
   // ---- استقبال حدث من Streamer.bot ----
-  // مثال Body متوقع:
-  // { "type": "streak", "username": "عبدو", "value": 7 }
-  // { "type": "level", "username": "عبدو", "value": 6 }
-  // { "type": "shareStreak", "username": "عبدو", "value": 3 }
-  // { "type": "xp", "username": "عبدو", "value": 320 }
+  // يدعم شكلين:
+  // 1) { "type": "streak", "userId": "12345", "username": "عبدو", "value": 7 }
+  // 2) { "userId": "12345", "username": "عبدو", "streak": 7, "streakBest": 12 }
   if (req.method === 'POST' && req.url === '/api/event') {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
       try {
         const event = JSON.parse(body);
-        const { type, username, value } = event;
+        const { type, userId, username, value, avatar, streak, streakBest, shareStreak, level, xp } = event;
 
-        if (!type || !username || value === undefined) {
+        if (!userId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'missing type/username/value' }));
+          res.end(JSON.stringify({ ok: false, error: 'missing userId' }));
           return;
         }
 
-        const user = ensureUser(username);
+        const user = ensureUser(userId, username);
 
-        // نحدث الحقل المناسب بس، بدون ما نلمس باقي البيانات
+        // الشكل القديم: type + value
         if (type === 'streak') user.streak = value;
         else if (type === 'shareStreak') user.shareStreak = value;
         else if (type === 'level') user.level = value;
         else if (type === 'xp') user.xp = value;
 
+        // الشكل الجديد: حقول مباشرة (يقدر يرسل أكثر من حقل بضربة وحدة)
+        if (streak !== undefined) user.streak = streak;
+        if (streakBest !== undefined) user.streakBest = streakBest;
+        if (shareStreak !== undefined) user.shareStreak = shareStreak;
+        if (level !== undefined) user.level = level;
+        if (xp !== undefined) user.xp = xp;
+
+        // نحدث الصورة لو وصلت (وما نمسحها لو ما وصلت بهذا الحدث بالذات)
+        if (avatar) user.avatar = avatar;
+
         user.lastUpdated = new Date().toISOString();
 
-        console.log(`حدث جديد: ${username} -> ${type} = ${value}`);
+        console.log(`حدث جديد: ${user.username} (${userId}) -> streak=${user.streak}, best=${user.streakBest}`);
 
         // نبث التحديث لكل المواقع المتصلة عن طريق WebSocket
         broadcastToDashboards({
           type: 'event',
-          username,
-          eventType: type,
-          value,
-          user: users[username],
+          userId,
+          user: users[userId],
         });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });

@@ -3,11 +3,114 @@
 // - يخزن حالة كل يوزر (لفل، ستريك، XP...) بالذاكرة
 // - يبث أي تحديث لحظيًا لأي موقع متصل عن طريق WebSocket (نفس فكرة قبل، بس لجهة الموقع)
 // - فيه كمان endpoint عادي (GET) يرجع آخر حالة كاملة، تقدر تستخدمه بدل WebSocket لو تبي أبسط
+// - يجيب صورة بروفايل اليوزر تلقائيًا من Twitch API (App Access Token) لما يوصل username جديد
 
 const { WebSocketServer } = require('ws');
 const http = require('http');
+const https = require('https');
 
 const PORT = process.env.PORT || 8080;
+
+// ============ إعدادات Twitch API ============
+// نقرأهم من متغيرات البيئة (Environment Variables) بـ Render، ما نحطهم بالكود مباشرة لأسباب أمان
+const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID || '';
+const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET || '';
+
+let twitchAppToken = null;
+let twitchTokenExpiry = 0;
+
+// نطلب App Access Token جديد من تويتش (يصلح لبيانات عامة فقط، بدون تسجيل دخول أي شخص)
+function getTwitchAppToken() {
+  return new Promise((resolve, reject) => {
+    if (!TWITCH_CLIENT_ID || !TWITCH_CLIENT_SECRET) {
+      reject(new Error('Twitch credentials missing'));
+      return;
+    }
+
+    // لو التوكن الحالي لسا صالح، نستخدمه بدل ما نطلب وحد جديد
+    if (twitchAppToken && Date.now() < twitchTokenExpiry) {
+      resolve(twitchAppToken);
+      return;
+    }
+
+    const postData = `client_id=${TWITCH_CLIENT_ID}&client_secret=${TWITCH_CLIENT_SECRET}&grant_type=client_credentials`;
+
+    const req = https.request(
+      {
+        hostname: 'id.twitch.tv',
+        path: '/oauth2/token',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(postData),
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.access_token) {
+              twitchAppToken = parsed.access_token;
+              // نجدد التوكن قبل انتهائه بدقيقة أمان
+              twitchTokenExpiry = Date.now() + (parsed.expires_in - 60) * 1000;
+              resolve(twitchAppToken);
+            } else {
+              reject(new Error('No access_token in response: ' + data));
+            }
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+    );
+
+    req.on('error', reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+// نجيب رابط صورة البروفايل من Twitch API باستخدام login (اسم المستخدم بأحرف صغيرة)
+function fetchTwitchAvatar(login) {
+  return new Promise(async (resolve) => {
+    try {
+      const token = await getTwitchAppToken();
+
+      const req = https.request(
+        {
+          hostname: 'api.twitch.tv',
+          path: `/helix/users?login=${encodeURIComponent(login.toLowerCase())}`,
+          method: 'GET',
+          headers: {
+            'Client-Id': TWITCH_CLIENT_ID,
+            Authorization: `Bearer ${token}`,
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => (data += chunk));
+          res.on('end', () => {
+            try {
+              const parsed = JSON.parse(data);
+              const avatarUrl = parsed.data && parsed.data[0] ? parsed.data[0].profile_image_url : null;
+              resolve(avatarUrl);
+            } catch (e) {
+              resolve(null);
+            }
+          });
+        }
+      );
+
+      req.on('error', () => resolve(null));
+      req.end();
+    } catch (e) {
+      console.log('فشل جلب توكن تويتش:', e.message);
+      resolve(null);
+    }
+  });
+}
 
 // ============ تخزين الحالة ============
 // كل يوزر مخزن حسب userId (ثابت لا يتغير)، ونحتفظ باسمه الحالي (username) للعرض
@@ -54,7 +157,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/api/event') {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const event = JSON.parse(body);
         const { type, userId, username, value, avatar, streak, streakBest, shareStreak, level, xp } = event;
@@ -80,14 +183,14 @@ const httpServer = http.createServer((req, res) => {
         if (level !== undefined) user.level = level;
         if (xp !== undefined) user.xp = xp;
 
-        // نحدث الصورة لو وصلت (وما نمسحها لو ما وصلت بهذا الحدث بالذات)
+        // نحدث الصورة لو وصلت مباشرة من البوت
         if (avatar) user.avatar = avatar;
 
         user.lastUpdated = new Date().toISOString();
 
         console.log(`حدث جديد: ${user.username} (${userId}) -> streak=${user.streak}, best=${user.streakBest}`);
 
-        // نبث التحديث لكل المواقع المتصلة عن طريق WebSocket
+        // نبث التحديث فورًا (بدون انتظار الصورة، عشان ما نبطئ الاستجابة)
         broadcastToDashboards({
           type: 'event',
           userId,
@@ -96,6 +199,21 @@ const httpServer = http.createServer((req, res) => {
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+
+        // لو ما عندنا صورة لهذا اليوزر بعد، نجيبها من Twitch API بالخلفية
+        // (بعد الرد، عشان ما نأخر استجابة الطلب الأساسي)
+        if (!user.avatar && username) {
+          const fetchedAvatar = await fetchTwitchAvatar(username);
+          if (fetchedAvatar) {
+            user.avatar = fetchedAvatar;
+            console.log(`تم جلب صورة ${username}`);
+            broadcastToDashboards({
+              type: 'event',
+              userId,
+              user: users[userId],
+            });
+          }
+        }
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));

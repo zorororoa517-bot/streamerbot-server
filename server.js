@@ -165,6 +165,24 @@ function ensureUser(userId, username) {
   return users[userId];
 }
 
+// ============ تحليل رسائل الشات النصية (مثل رسايل بوت IxkeeMo) ============
+// شكل الرسالة اللي توصل من الشات: "@username has watched N streams in a row! 🔥"
+// نحاول نطلع منها username + عدد الستريك تلقائيًا لو ما وصلتنا بيانات منظمة (JSON محدد الحقول)
+function parseChatMessage(text) {
+  if (!text || typeof text !== 'string') return null;
+
+  // مثال: @indomeeee has watched 1 streams in a row! 🔥
+  const streakMatch = text.match(/@([A-Za-z0-9_]+)\s+has\s+watched\s+(\d+)\s+streams?\s+in\s+a\s+row/i);
+  if (streakMatch) {
+    return {
+      username: streakMatch[1],
+      streak: parseInt(streakMatch[2], 10),
+    };
+  }
+
+  return null;
+}
+
 // ============ سيرفر HTTP ============
 const httpServer = http.createServer((req, res) => {
   // نفعّل CORS عشان أي موقع يقدر يقرأ البيانات من المتصفح مباشرة
@@ -188,7 +206,20 @@ const httpServer = http.createServer((req, res) => {
     req.on('end', async () => {
       try {
         const event = JSON.parse(body);
-        const { type, userId, username, value, avatar, streak, streakBest, shareStreak, level, xp } = event;
+        let { type, userId, username, value, avatar, streak, streakBest, shareStreak, level, xp } = event;
+
+        // ---- الشكل الثالث: رسالة شات نصية خام (مثل بوت IxkeeMo) ----
+        // ممكن توصل بالحقل "message" أو "text" بدل الحقول المنظمة
+        const rawText = event.message || event.text;
+        if (rawText) {
+          const parsed = parseChatMessage(rawText);
+          if (parsed) {
+            username = username || parsed.username;
+            // نستخدم اسم اليوزر (بأحرف صغيرة) كـ userId ثابت لو ما وصلنا userId حقيقي
+            userId = userId || parsed.username.toLowerCase();
+            if (streak === undefined) streak = parsed.streak;
+          }
+        }
 
         if (!userId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
